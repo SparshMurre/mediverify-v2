@@ -1,24 +1,24 @@
-const MODELS = ['gemini-3.8-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash']
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim()
   if (!apiKey) {
-    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' })
+    return res.status(500).json({ error: 'GEMINI_API_KEY is missing in Vercel Environment Variables. Add it and Redeploy.' })
   }
 
-  try {
-    const { mode, query, imageBase64, mimeType, matchedMedicines } = req.body
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 8500)
 
-    let prompt = ''
+  try {
+    const { mode, query, imageBase64, mimeType, matchedMedicines } = req.body || {}
     const parts = []
 
     if (mode === 'scan' && imageBase64) {
-      prompt = `You are MediVerify AI, an Indian clinical pharmacy assistant.
-Analyze this medicine strip/pack image and return ONLY valid JSON (no markdown fences) with this exact schema:
+      parts.push({
+        text: `You are MediVerify AI, an Indian clinical pharmacy assistant.
+Analyze this medicine strip/pack image and return ONLY valid JSON with this exact schema:
 {
   "brand_name": "Detected brand name (e.g. Dolo 650, Augmentin 625)",
   "salt_composition": "Exact active generic salt + strength (e.g. Paracetamol 650mg)",
@@ -27,7 +27,7 @@ Analyze this medicine strip/pack image and return ONLY valid JSON (no markdown f
   "authenticity_notes": "Brief check on packaging print clarity, batch/MRP presence",
   "summary": "2-sentence patient-friendly explanation of what this medicine treats and key precaution"
 }`
-      parts.push({ text: prompt })
+      })
       parts.push({
         inline_data: {
           mime_type: mimeType || 'image/jpeg',
@@ -35,11 +35,12 @@ Analyze this medicine strip/pack image and return ONLY valid JSON (no markdown f
         }
       })
     } else {
-      prompt = `You are MediVerify AI, an Indian clinical pharmacy & Jan Aushadhi (PMBJP) advisor.
+      parts.push({
+        text: `You are MediVerify AI, an Indian clinical pharmacy & Jan Aushadhi (PMBJP) advisor.
 User searched: "${query}"
-Database matches found: ${JSON.stringify((matchedMedicines || []).slice(0, 6))}
+Database matches: ${JSON.stringify((matchedMedicines || []).slice(0, 5))}
 
-Return ONLY valid JSON (no markdown fences) with this exact schema:
+Return ONLY valid JSON with this exact schema:
 {
   "identified_salt": "Primary generic salt composition",
   "clinical_use": "What condition this medicine is prescribed for in simple terms",
@@ -47,40 +48,41 @@ Return ONLY valid JSON (no markdown fences) with this exact schema:
   "safety_warnings": "Key contraindications, dosage caution, or Schedule H prescription warning",
   "recommended_action": "Actionable advice on switching to the Jan Aushadhi generic or consulting a pharmacist"
 }`
-      parts.push({ text: prompt })
+      })
     }
 
-    let lastError = 'Gemini API error'
-    for (const model of MODELS) {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: {
-              temperature: 0.2,
-              responseMimeType: 'application/json'
-            }
-          })
-        }
-      )
-
-      const data = await response.json()
-      if (response.ok) {
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
-        return res.status(200).json(JSON.parse(rawText))
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0.2,
+            responseMimeType: 'application/json'
+          }
+        })
       }
+    )
 
-      lastError = data.error?.message || lastError
-      if (!/no longer available|not found|deprecated/i.test(lastError)) {
-        return res.status(response.status).json({ error: lastError })
-      }
+    clearTimeout(timeout)
+    const data = await response.json()
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: data.error?.message || `Gemini API returned HTTP ${response.status}`
+      })
     }
 
-    return res.status(502).json({ error: lastError })
+    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
+    return res.status(200).json(JSON.parse(rawText))
   } catch (err) {
-    return res.status(500).json({ error: err.message || 'Server error' })
+    clearTimeout(timeout)
+    const msg = err.name === 'AbortError'
+      ? 'AI request timed out after 8.5s. Try a smaller/clearer photo or retry.'
+      : (err.message || 'Server error')
+    return res.status(500).json({ error: msg })
   }
 }
