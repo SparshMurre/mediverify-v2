@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { ArrowLeft, Share2, PlusCircle, AlertTriangle, BadgeCheck } from 'lucide-react'
+import { ArrowLeft, Share2, PlusCircle, AlertTriangle, BadgeCheck, Sparkles } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
 export default function MedicineDetail({ user }) {
@@ -8,9 +8,12 @@ export default function MedicineDetail({ user }) {
   const [med, setMed] = useState(null)
   const [alternatives, setAlternatives] = useState([])
   const [savedMsg, setSavedMsg] = useState('')
+  const [aiAnalysis, setAiAnalysis] = useState(null)
+  const [aiLoading, setAiLoading] = useState(false)
 
   useEffect(() => {
     async function load() {
+      setAiAnalysis(null)
       const { data } = await supabase
         .from('medicines')
         .select('*, salts(*)')
@@ -24,10 +27,32 @@ export default function MedicineDetail({ user }) {
         .select('*')
         .eq('salt_id', data.salt_id)
         .order('official_mrp', { ascending: true })
+        .limit(25)
       setAlternatives(alts || [])
     }
     load()
   }, [id])
+
+  async function runAiInsight() {
+    if (!med) return
+    setAiLoading(true)
+    try {
+      const res = await fetch('/api/ai-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: 'recommend',
+          query: `${med.brand_name} (${med.salts?.salt_name})`,
+          matchedMedicines: alternatives.slice(0, 5)
+        })
+      })
+      const json = await res.json()
+      setAiAnalysis(json)
+    } catch {
+      setAiAnalysis({ error: 'Could not reach AI advisor.' })
+    }
+    setAiLoading(false)
+  }
 
   async function addToCabinet() {
     if (!user) return setSavedMsg('Please sign in first to save medicines to your cabinet.')
@@ -85,16 +110,40 @@ export default function MedicineDetail({ user }) {
             <PlusCircle className="w-4 h-4" /> Save to Cabinet
           </button>
           <button
+            onClick={runAiInsight}
+            disabled={aiLoading}
+            className="px-4 py-2 rounded-xl bg-amber-400 text-slate-950 text-sm font-semibold hover:bg-amber-300 flex items-center gap-1.5"
+          >
+            <Sparkles className="w-4 h-4" /> {aiLoading ? 'Analyzing...' : 'AI Generic & Safety Check'}
+          </button>
+          <button
             onClick={shareWhatsApp}
             className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 text-sm font-medium hover:bg-slate-50 flex items-center gap-1.5"
           >
-            <Share2 className="w-4 h-4" /> Share Info
+            <Share2 className="w-4 h-4" /> Share
           </button>
         </div>
         {savedMsg && <p className="mt-2.5 text-xs font-medium text-teal-700">{savedMsg}</p>}
+
+        {aiAnalysis && (
+          <div className="mt-4 p-4 rounded-xl bg-teal-50/70 border border-teal-200 text-xs space-y-2">
+            {aiAnalysis.error ? (
+              <p className="text-red-600">{aiAnalysis.error}</p>
+            ) : (
+              <>
+                <p className="font-bold text-teal-950 flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-teal-600" /> Gemini AI Clinical Summary
+                </p>
+                <p className="text-slate-700"><strong>Clinical Use:</strong> {aiAnalysis.clinical_use}</p>
+                <p className="text-slate-700"><strong>Generic Bioequivalence:</strong> {aiAnalysis.bioequivalence_note}</p>
+                <p className="text-amber-900"><strong>Safety Warning:</strong> {aiAnalysis.safety_warnings}</p>
+                <p className="text-emerald-800 font-semibold">{aiAnalysis.recommended_action}</p>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Same-Salt Generic Comparison */}
       <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-bold text-slate-900">Same-Salt Alternatives ({alternatives.length})</h2>
@@ -128,7 +177,6 @@ export default function MedicineDetail({ user }) {
         </div>
       </div>
 
-      {/* Clinical Information */}
       <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4 text-sm">
         <div>
           <h3 className="font-bold text-slate-900">Indications & Uses</h3>
@@ -142,9 +190,6 @@ export default function MedicineDetail({ user }) {
           <h3 className="font-bold text-slate-900">Warnings & Precautions</h3>
           <p className="text-slate-600 mt-1">{med.salts?.warnings}</p>
         </div>
-        <p className="text-[11px] text-slate-400 pt-2 border-t border-slate-100">
-          Clinical Source: {med.salts?.clinical_source}
-        </p>
       </div>
 
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 flex gap-2.5 text-xs text-amber-900">
